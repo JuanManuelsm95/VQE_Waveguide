@@ -57,40 +57,59 @@ from .coldplasma_vqe_waveguide import WaveguideModeVQA
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _config_key(nx: int, ny: int, n_layers: int,
-                mode_type: str, k: int) -> str:
-    """Unique string key for a (grid, depth, mode) configuration.
-
-    Parameters for this key share the **same parameter-vector dimensionality**
-    n_params = (nx+ny) * (n_layers + k)   (simplified; see _effective_layers)
-    and are therefore trained with a single MLP.
+                mode_type: str, k: int,
+                plasma_density: float = 0.0,
+                density_in_key: bool = False) -> str:
+    """Unique string key for a configuration.
+ 
+    When density_in_key is False (default) the key is the same for all
+    densities → one shared MLP learns across densities.
+ 
+    When density_in_key is True the density is encoded in the key
+    → each density gets its own MLP.
     """
-    return f"nx{nx}_ny{ny}_nl{n_layers}_mt{mode_type}_k{k}"
+    base = f"nx{nx}_ny{ny}_nl{n_layers}_mt{mode_type}_k{k}"
+    if density_in_key:
+        tag = "vacuum" if plasma_density == 0.0 else f"ne{plasma_density:.1e}"
+        return f"{base}_{tag}"
+    return base
 
 
-def _build_features(nx: int, ny: int, n_layers: int,
-                    mode_type: str, k: int,
-                    plasma_density: float,
-                    target_eigenvalue: Optional[float] = None) -> np.ndarray:
+def _build_features(nx, ny, n_layers, mode_type, k,
+                    plasma_density,
+                    target_eigenvalue,
+                    density_in_key=False):
     """Encode a solver configuration as a fixed-length feature vector.
 
-    Features
-    ────────
+    Features (density_in_key=False, default)
+    ────────────────────────────────────────
       0   nx                          (int, grid resolution)
       1   ny
       2   n_layers                    (circuit depth)
       3   mode_type_enc               (0 = TM, 1 = TE)
       4   k                           (mode index)
       5   log10(1 + plasma_density)   (log-scale density)
-      6   target_eigenvalue           (0.0 if unknown)
+      6   log10(target_eigenvalue)    (classical λ for mode k)
 
-    A log transform on the density prevents the large range of Ne (1e14–1e20)
-    from swamping the other features.
+    Features (density_in_key=True)
+    ──────────────────────────────
+      Same as above without index 5 (density is encoded in the key instead).
+
+    The target eigenvalue is the k-th physical classical eigenvalue obtained
+    from np.linalg.eigvalsh(solver.M_dense) — cheap to compute and a strong
+    physics-aware fingerprint of which mode the VQE is targeting.
     """
+
     mode_enc = 0.0 if mode_type == "TM" else 1.0
-    log_density = np.log10(1.0 + max(plasma_density, 0.0))
-    eig = float(target_eigenvalue) if target_eigenvalue is not None else 0.0
-    return np.array([nx, ny, n_layers, mode_enc, k, log_density, eig],
-                    dtype=np.float64)
+    log_target = np.log10(target_eigenvalue)
+
+    if density_in_key:
+        return np.array([nx, ny, n_layers, mode_enc, k, log_target],
+                        dtype=np.float64)
+    else:
+        log_density = np.log10(1.0 + max(plasma_density, 0.0))
+        return np.array([nx, ny, n_layers, mode_enc, k, log_density, log_target],
+                        dtype=np.float64)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -101,7 +120,7 @@ class WarmStartCollector:
     """Runs VQE optimisations and appends (features, params) pairs to a JSON store.
 
     Each successful optimisation produces one training sample:
-        X  = feature vector (7-d)
+        X  = feature vector (6-d)
         y  = optimised parameter vector (variable length per config key)
 
     Multiple runs per configuration increase robustness by covering more of the
@@ -119,12 +138,13 @@ class WarmStartCollector:
 
     def __init__(self, data_path: str = "warmstart_data.json",
                  Lx: float = 0.015, Ly: float = 0.010,
-                 Ne_func: Optional[Callable] = None):
+                 Ne_func: Optional[Callable] = None, density_in_key=False):
         self.data_path = data_path
         self.Lx = Lx
         self.Ly = Ly
         self.Ne_func = Ne_func
         self._store: Dict = self._load()
+        self.density_in_key = density_in_key
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
@@ -151,31 +171,41 @@ class WarmStartCollector:
                 plasma_density: float = 0.0,
                 n_runs: int = 5,
                 extra_layers_per_mode: int = 1,
+                eigenvalue_rtol: float = 0.05,
                 verbose: bool = True) -> None:
         """Run `n_runs` independent VQE optimisations and store the results.
-
+    
+        Only samples whose eigenvalue is close to the *correct* k-th
+        classical eigenvalue (from M_dense) are kept.  This prevents the
+        MLP from learning parameters that converge to the wrong mode.
+    
         Parameters
         ──────────
         nx, ny          : qubit counts (grid = 2^nx × 2^ny)
-        n_layers        : base ansatz depth.  Defaults to nx+ny when None,
-                          which is the recommended rule-of-thumb: the circuit
-                          depth grows with the grid so that the ansatz always
-                          has enough expressivity to represent the eigenfunction.
+        n_layers        : base ansatz depth.  Defaults to nx+ny when None.
         mode_type       : 'TM' or 'TE'
         k               : mode index (0-based)
         plasma_density  : uniform electron density [m⁻³] (0 = vacuum)
         n_runs          : how many random restarts to collect
         extra_layers_per_mode : forwarded to WaveguideModeVQA
+        eigenvalue_rtol : float  (NEW)
+            Relative tolerance for eigenvalue matching.  A VQE result is
+            accepted only if:
+                |λ_vqe - λ_classical[k]| / λ_classical[k]  <  eigenvalue_rtol
+            Default 0.05 (5%).  Increase for noisy / low-resolution grids.
         """
+        from .coldplasma_vqe_waveguide import WaveguideModeVQA
+    
         if n_layers is None:
             n_layers = nx + ny
             if verbose:
                 print(f"  [collect] n_layers not specified — using nx+ny = {n_layers}")
-
-        key = _config_key(nx, ny, n_layers, mode_type, k)
+    
+        key = _config_key(nx, ny, n_layers, mode_type, k, plasma_density=plasma_density,
+                          density_in_key=self.density_in_key)
         if key not in self._store:
             self._store[key] = {"X": [], "y": []}
-
+    
         solver = WaveguideModeVQA(
             nx=nx, ny=ny, n_layers=n_layers,
             mode_type=mode_type,
@@ -184,8 +214,71 @@ class WarmStartCollector:
             Ne_func=self.Ne_func,
             plasma_density=plasma_density,
         )
+    
+        # ── NEW: compute classical eigenvalues from M_dense ───────────────
+        classical_eigs = np.sort(np.linalg.eigvalsh(solver.M_dense))
+    
+        # Filter to physical eigenvalues only:
+        #   TM modes: eigenvalues > 0   (Dirichlet BCs, all positive)
+        #   TE modes: eigenvalues > 1   (Neumann BCs have a spurious zero mode)
+        eig_threshold = 0.0 if mode_type == "TM" else 1.0
+        physical_eigs = np.array([e for e in classical_eigs if e > eig_threshold])
+    
+        if k >= len(physical_eigs):
+            raise ValueError(
+                f"Mode index k={k} exceeds the number of physical "
+                f"{mode_type} eigenvalues ({len(physical_eigs)}) on a "
+                f"{2**nx}×{2**ny} grid."
+            )
+    
+        target_eig = physical_eigs[k]
+    
+        if verbose:
+            print(f"  [collect] Classical eigenvalue for {mode_type} k={k}: "
+                f"λ_ref = {target_eig:.4f}")
+        # ── END NEW ───────────────────────────────────────────────────────
+
+        # ── Bootstrap lower modes on this solver ──────────────────────────
+        # optimize_mode(k) for k > 0 needs solver.optimized_states[0..k-1]
+        # populated (used by the orthogonality penalty in cost_function).
+        # Since we build a fresh solver per collect() call, we must first
+        # solve modes 0..k-1 here, rejecting wrong-mode convergences.
+        if k > 0:
+            bootstrap_max_tries = 10
+            for i in range(k):
+                target_i = physical_eigs[i]
+                tries = 0
+                while len(solver.optimized_states) <= i and tries < bootstrap_max_tries:
+                    tries += 1
+                    try:
+                        ev_i, _, _ = solver.optimize_mode(i)
+                    except Exception as exc:
+                        warnings.warn(
+                            f"Bootstrap mode {i} try {tries} failed: {exc}"
+                        )
+                        continue
+                    rel_i = abs(ev_i - target_i) / abs(target_i)
+                    if ev_i < 1.0 or rel_i > eigenvalue_rtol:
+                        # optimize_mode always appends — drop the bad state
+                        if len(solver.optimized_states) > i:
+                            solver.optimized_states.pop()
+                            solver.eigenvalues.pop()
+                        if verbose:
+                            print(f"  [bootstrap] mode {i} try {tries}: "
+                                  f"λ={ev_i:.4f} REJECTED "
+                                  f"(rel_err={rel_i:.2%})")
+                    elif verbose:
+                        print(f"  [bootstrap] mode {i} locked in "
+                              f"λ={ev_i:.4f} after {tries} try(s)")
+                if len(solver.optimized_states) <= i:
+                    raise RuntimeError(
+                        f"Failed to bootstrap mode {i} for key '{key}' "
+                        f"after {bootstrap_max_tries} tries; cannot collect k={k}."
+                    )
+        # ── END bootstrap ─────────────────────────────────────────────────
 
         n_collected = 0
+        n_rejected  = 0                                            # NEW counter
         for run in range(n_runs):
             t0 = time.time()
             try:
@@ -193,29 +286,46 @@ class WarmStartCollector:
             except Exception as exc:
                 warnings.warn(f"Run {run} failed: {exc}")
                 continue
-
+    
             if eigenvalue < 0.0:
                 if verbose:
-                    print(f"  run {run}: unphysical eigenvalue {eigenvalue:.4f}, skipped.")
+                    print(f"  run {run}: unphysical eigenvalue "
+                        f"{eigenvalue:.4f}, skipped.")
                 continue
-
+    
+            # ── NEW: check that VQE found the correct mode ────────────────
+            rel_error = abs(eigenvalue - target_eig) / abs(target_eig)
+            if rel_error > eigenvalue_rtol:
+                n_rejected += 1
+                if verbose:
+                    dt = time.time() - t0
+                    print(f"  [{key}] run {run+1}/{n_runs} "
+                        f"λ={eigenvalue:.4f}  REJECTED "
+                        f"(rel_err={rel_error:.2%} vs λ_ref={target_eig:.4f})  "
+                        f"({dt:.1f}s)")
+                continue
+            # ── END NEW ───────────────────────────────────────────────────
+    
             features = _build_features(
                 nx, ny, n_layers, mode_type, k,
-                plasma_density, eigenvalue
+                plasma_density,
+                target_eigenvalue=target_eig,
+                density_in_key=self.density_in_key
             ).tolist()
-
+    
             self._store[key]["X"].append(features)
             self._store[key]["y"].append(params.tolist())
             n_collected += 1
-
+    
             if verbose:
                 dt = time.time() - t0
                 print(f"  [{key}] run {run+1}/{n_runs} "
-                      f"λ={eigenvalue:.4f}  ({dt:.1f}s)")
-
+                    f"λ={eigenvalue:.4f}  ({dt:.1f}s)")
+    
         self._save()
         print(f"Collected {n_collected} new samples for '{key}' "
-              f"(total: {len(self._store[key]['X'])})")
+            f"(total: {len(self._store[key]['X'])})"
+            f"  [rejected {n_rejected} wrong-mode convergences]")    # NEW info
 
     # ── Inspection ────────────────────────────────────────────────────────────
 
@@ -242,7 +352,7 @@ class WarmStartPredictor:
 
     Architecture
     ────────────
-    Input  : 7-d feature vector (see _build_features)
+    Input  : 7-d feature vector (6-d when density_in_key=True, see _build_features)
     Hidden : two hidden layers of width max(64, 4·n_params)
     Output : n_params floats in [-π, π]
 
@@ -262,11 +372,13 @@ class WarmStartPredictor:
                  data_path: str = "warmstart_data.json",
                  hidden_layer_multiplier: int = 4,
                  max_iter: int = 2000,
-                 model_dir: Optional[str] = None):
+                 model_dir: Optional[str] = None,
+                 density_in_key=False):
         self.data_path = data_path
         self.hidden_layer_multiplier = hidden_layer_multiplier
         self.max_iter = max_iter
         self.model_dir = model_dir
+        self.density_in_key = density_in_key
 
         # Per-key artefacts
         self._models:   Dict[str, MLPRegressor] = {}
@@ -338,8 +450,22 @@ class WarmStartPredictor:
             store = json.load(f)
 
         for key, data in store.items():
-            X_raw = np.array(data["X"])   # (N, 7)
-            Y_raw = np.array(data["y"])   # (N, n_params)
+            # Guard against inhomogeneous feature lengths (e.g. data
+            # collected across code versions with different feature sets).
+            X_list, Y_list = data["X"], data["y"]
+            lengths = [len(x) for x in X_list]
+            if not lengths:
+                continue
+            target_len = max(set(lengths), key=lengths.count)
+            mask = [l == target_len for l in lengths]
+            if not all(mask):
+                n_dropped = sum(not m for m in mask)
+                warnings.warn(
+                    f"  '{key}': dropped {n_dropped}/{len(mask)} samples "
+                    f"with mismatched feature length (expected {target_len})."
+                )
+            X_raw = np.array([x for x, m in zip(X_list, mask) if m])
+            Y_raw = np.array([y for y, m in zip(Y_list, mask) if m])
             N = len(X_raw)
 
             if N < 4:
@@ -360,14 +486,15 @@ class WarmStartPredictor:
             width = max(64, self.hidden_layer_multiplier * n_params)
             hidden = (width, width)
 
+            use_early_stop = N >= 10
             mlp = MLPRegressor(
                 hidden_layer_sizes=hidden,
                 activation="tanh",      # smooth, bounded — good for angles
                 solver="adam",
                 max_iter=self.max_iter,
                 random_state=42,
-                early_stopping=True,
-                validation_fraction=0.2 if N >= 10 else 0.0,
+                early_stopping=use_early_stop,
+                validation_fraction=0.2 if use_early_stop else 0.1,
                 n_iter_no_change=50,
                 learning_rate_init=1e-3,
                 tol=1e-5,
@@ -402,7 +529,10 @@ class WarmStartPredictor:
         nx, ny, n_layers, mode_type, k, plasma_density
             Solver configuration — must match a trained key.
         target_eigenvalue
-            If known from a coarse estimate, including it improves accuracy.
+            The k-th physical classical eigenvalue (from
+            np.linalg.eigvalsh(solver.M_dense)).  Required: it is part of the
+            feature vector and gives the MLP a physics-aware fingerprint of
+            the targeted mode.
         noise_std
             Small Gaussian noise added to the prediction for exploration.
             Set to 0.0 for a deterministic warm start.
@@ -411,14 +541,24 @@ class WarmStartPredictor:
         ───────
         θ₀ : np.ndarray of shape (n_params,) or None if no model is available.
         """
-        key = _config_key(nx, ny, n_layers, mode_type, k)
+        key = _config_key(nx, ny, n_layers, mode_type, k,plasma_density=plasma_density,
+                            density_in_key=self.density_in_key)
 
         if not self._trained.get(key, False):
             return None  # caller falls back to random initialisation
 
+        if target_eigenvalue is None:
+            raise ValueError(
+                "target_eigenvalue is required.  Compute via "
+                "np.sort(np.linalg.eigvalsh(solver.M_dense)) and select the "
+                "k-th physical eigenvalue (>0 for TM, >1 for TE)."
+            )
+
         feat = _build_features(
             nx, ny, n_layers, mode_type, k,
-            plasma_density, target_eigenvalue
+            plasma_density,
+            target_eigenvalue=target_eigenvalue,
+            density_in_key=self.density_in_key
         ).reshape(1, -1)
 
         X_scaled = self._scalers[key].transform(feat)
@@ -431,10 +571,11 @@ class WarmStartPredictor:
         return params
 
     def is_trained(self, nx: int, ny: int, n_layers: int,
-                   mode_type: str, k: int) -> bool:
+                   mode_type: str, k: int, plasma_density =0.0) -> bool:
         """Return True if a model is available for this configuration."""
         return self._trained.get(
-            _config_key(nx, ny, n_layers, mode_type, k), False
+            _config_key(nx, ny, n_layers, mode_type, k, plasma_density=plasma_density,
+                        density_in_key=self.density_in_key), False
         )
 
     def trained_keys(self) -> List[str]:
@@ -454,8 +595,7 @@ class WarmStartVQA(WaveguideModeVQA):
     Warm-start logic in optimize_mode
     ──────────────────────────────────
     Attempt 1 : ML prediction (if a trained model exists for this config)
-    Attempt 2 : saved JSON parameters from a previous run  (unchanged)
-    Attempt 3+: random uniform in [-π, π]                  (unchanged)
+    Attempt 2+: random uniform in [-π, π]
 
     Parameters
     ──────────
@@ -488,12 +628,22 @@ class WarmStartVQA(WaveguideModeVQA):
         attempts  = 0
         history   = []
 
+        class _EarlyRestart(Exception):
+            pass
+
         while eigenvalue < 0.0 and attempts < max_attempts:
             attempts += 1
             history   = []
 
             # ── Initialisation strategy ───────────────────────────────────
             if attempts == 1 and self.predictor is not None:
+                # Classical λ for mode k — used as a feature so the MLP knows
+                # which point in the spectrum it is targeting.
+                classical_eigs = np.sort(np.linalg.eigvalsh(self.M_dense))
+                eig_threshold = 0.0 if self.mode_type == "TM" else 1.0
+                physical_eigs = classical_eigs[classical_eigs > eig_threshold]
+                target_eig = float(physical_eigs[k])
+
                 # Strategy A: ML warm start
                 theta0 = self.predictor.predict(
                     nx=self.nx, ny=self.ny,
@@ -504,45 +654,53 @@ class WarmStartVQA(WaveguideModeVQA):
                         np.mean(self.plasma_potential_flat)
                         * (self.c**2 * self.me * self.eps0 / self.qe**2)
                     ),
+                    target_eigenvalue=target_eig,
                     noise_std=self.warm_start_noise,
                 )
                 if theta0 is not None and len(theta0) == n_params:
                     print(f"[WarmStart] Using ML prediction for mode {k}.")
                 else:
                     print(f"[WarmStart] No model for this config — "
-                          "falling back to saved params / random.")
+                          "falling back to random.")
                     theta0 = None
-
-            elif attempts == 2 and self.use_params_file:
-                # Strategy B: load from JSON (original logic)
-                theta0 = self.load_params(k)
-                if theta0 is not None:
-                    theta0 += np.abs(np.random.normal(0, 0.1, n_params))
-
             else:
                 theta0 = None
 
             if theta0 is None or len(theta0) != n_params:
-                # Strategy C: random
+                # Random fallback
                 theta0 = np.random.uniform(-np.pi, np.pi, n_params)
+
+            last_x = [theta0]
 
             # ── Optimisation (unchanged from base class) ──────────────────
             def callback(xk):
+                last_x[0] = xk
                 val = self.cost_function(xk, k, beta)
                 history.append(val)
                 print(f"Attempt {attempts} - Iter {len(history)}: "
                       f"Cost {val:.4f}    ", end="\r")
+                # Early restart: if at iteration 50 the cost is already in the
+                # unphysical regime (< 1), abort this attempt instead of
+                # running all 400 iterations just to discard the result.
+                if len(history) == 50 and val < 1.0:
+                    raise _EarlyRestart()
 
-            result = minimize(
-                lambda p: self.cost_function(p, k, beta),
-                theta0,
-                method="L-BFGS-B",
-                callback=callback,
-                options={"maxiter": 400},
-            )
-
-            eigenvalue       = result.fun
-            optimized_params = result.x
+            try:
+                result = minimize(
+                    lambda p: self.cost_function(p, k, beta),
+                    theta0,
+                    method="L-BFGS-B",
+                    callback=callback,
+                    options={"maxiter": 400},
+                )
+                eigenvalue       = result.fun
+                optimized_params = result.x
+            except _EarlyRestart:
+                eigenvalue       = history[-1]
+                optimized_params = last_x[0]
+                print(f"\n[EarlyRestart] Attempt {attempts} cost "
+                      f"{eigenvalue:.4f} at iter 50 (< 1). Restarting...")
+                continue
 
             if eigenvalue < 1.0:
                 print(f"\n[Warning] Attempt {attempts} found eigenvalue "
@@ -553,7 +711,6 @@ class WarmStartVQA(WaveguideModeVQA):
             .Statevector(self.ansatz(optimized_params, k)).data
         )
         self.eigenvalues.append(eigenvalue)
-        self.optimized_params_list = [optimized_params]
 
         return eigenvalue, optimized_params, history
 
@@ -588,8 +745,15 @@ def plot_warmstart_quality(data_path: str,
             print(f"Key '{k}' not found in store.")
             continue
 
-        X_raw = np.array(store[k]["X"])
-        Y_raw = np.array(store[k]["y"])
+        X_list, Y_list = store[k]["X"], store[k]["y"]
+        lengths = [len(x) for x in X_list]
+        if not lengths:
+            print(f"Key '{k}' has no samples.")
+            continue
+        target_len = max(set(lengths), key=lengths.count)
+        mask = [l == target_len for l in lengths]
+        X_raw = np.array([x for x, m in zip(X_list, mask) if m])
+        Y_raw = np.array([y for y, m in zip(Y_list, mask) if m])
         N, n_params = Y_raw.shape
 
         Y_pred = np.zeros_like(Y_raw)
@@ -599,11 +763,20 @@ def plot_warmstart_quality(data_path: str,
             n_layers= int(feat[2])
             mt      = "TM" if feat[3] < 0.5 else "TE"
             ki      = int(feat[4])
-            density = 10**feat[5] - 1
-            eigen   = feat[6]
+            # Feature layout:
+            #   density_in_key=False → [..., k, log_density, log_target] (7-d)
+            #   density_in_key=True  → [..., k, log_target] (6-d)
+            if len(feat) >= 7:
+                density    = 10**feat[5] - 1
+                target_eig = 10**feat[6]
+            else:
+                density    = 0.0  # density encoded in the key, not features
+                target_eig = 10**feat[5]
 
             p = predictor.predict(
-                nx, ny, n_layers, mt, ki, density, eigen, noise_std=0.0
+                nx, ny, n_layers, mt, ki, density,
+                target_eigenvalue=target_eig,
+                noise_std=0.0,
             )
             Y_pred[i] = p if p is not None else np.zeros(n_params)
 
@@ -658,12 +831,21 @@ def benchmark_warmstart(predictor: WarmStartPredictor,
         n_params = solver.n * solver._effective_layers(k)
         beta = 4e5
 
+        # Classical λ for mode k — required feature for the predictor.
+        classical_eigs = np.sort(np.linalg.eigvalsh(solver.M_dense))
+        eig_threshold = 0.0 if mode_type == "TM" else 1.0
+        physical_eigs = classical_eigs[classical_eigs > eig_threshold]
+        target_eig = float(physical_eigs[k])
+
         for trial in range(n_trials):
             if strategy == "warm":
                 theta0 = predictor.predict(
                     nx, ny, n_layers, mode_type, k, plasma_density,
-                    noise_std=0.05
-                ) or np.random.uniform(-np.pi, np.pi, n_params)
+                    target_eigenvalue=target_eig,
+                    noise_std=0.05,
+                )
+                if theta0 is None:
+                    theta0 = np.random.uniform(-np.pi, np.pi, n_params)
             else:
                 theta0 = np.random.uniform(-np.pi, np.pi, n_params)
 

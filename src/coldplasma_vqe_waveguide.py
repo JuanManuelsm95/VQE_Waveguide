@@ -34,8 +34,6 @@ from qiskit.primitives import StatevectorEstimator
 from scipy.optimize import minimize
 from typing import List, Tuple, Callable, Optional
 import matplotlib.pyplot as plt
-import os
-import json
 import sys
 
 
@@ -72,10 +70,6 @@ class WaveguideModeVQA:
         or 'ALT' for alternating even/odd entanglement.
     extra_layers_per_mode : int
         Additional circuit layers per mode index (k > 0).
-    use_params_file : bool
-        If True, attempt to load initial parameters from a JSON file.
-    params_dir : str
-        Directory for saving/loading optimised parameter files.
     Lx, Ly : float
         Physical waveguide dimensions in metres.
     Ne_func : callable or None
@@ -87,8 +81,6 @@ class WaveguideModeVQA:
     def __init__(self, nx: int, ny: int, n_layers: int, mode_type: str = 'TM',
                  ansatz_type: str = 'HEA',
                  extra_layers_per_mode: int = 1,
-                 use_params_file: bool = False,
-                 params_dir: str = 'saved_parameters',
                  Lx: float = 0.015, Ly: float = 0.010,
                  Ne_func: Optional[Callable[[float, float], float]] = None,
                  plasma_density: float = 0.0):
@@ -98,13 +90,9 @@ class WaveguideModeVQA:
         self.n = nx + ny
         self.mode_type = mode_type
         self.ansatz_type = ansatz_type
-        self.use_params_file = use_params_file
-        self.params_dir = params_dir
-        self.params_file = os.path.join(params_dir, 'coldplasma_optimized_params.json')
         self.n_layers = n_layers
         self.extra_layers_per_mode = extra_layers_per_mode
         self.estimator = StatevectorEstimator()
-        self.optimized_params_list = []
 
         self.Lx = Lx
         self.Ly = Ly
@@ -379,16 +367,9 @@ class WaveguideModeVQA:
         # Orthogonality penalty for excited states
         if k > 0:
             state = Statevector(qc).data
-            if len(self.optimized_states) < k:
-                previous_params = self.load_params(k - 1)
-                if previous_params is not None:
-                    previous_state = Statevector(self.ansatz(previous_params, k - 1)).data
-                    overlap = np.abs(np.vdot(previous_state, state))**2
-                    cost += beta * overlap
-            else:
-                for i in range(k):
-                    overlap = np.abs(np.vdot(self.optimized_states[i], state))**2
-                    cost += beta * overlap
+            for i in range(k):
+                overlap = np.abs(np.vdot(self.optimized_states[i], state))**2
+                cost += beta * overlap
 
         return cost
 
@@ -404,34 +385,43 @@ class WaveguideModeVQA:
         max_attempts = 5
         attempts = 0
 
+        class _EarlyRestart(Exception):
+            pass
+
         while eigenvalue < 1.0 and attempts < max_attempts: # This condition is aplied because the first TE mode converges to a non physical one
             attempts += 1
             history = []
 
-            if self.use_params_file is True and attempts == 1:
-                current_initial_params = self.load_params(k)
-                if current_initial_params is not None:
-                    current_initial_params += np.abs(np.random.normal(0, 0.1, n_params))
-                else:
-                    current_initial_params = np.random.uniform(-np.pi, np.pi, n_params)
-            else:
-                current_initial_params = np.random.uniform(-np.pi, np.pi, n_params)
+            current_initial_params = np.random.uniform(-np.pi, np.pi, n_params)
+            last_x = [current_initial_params]
 
             def callback(xk):
+                last_x[0] = xk
                 val = self.cost_function(xk, k, beta)
                 history.append(val)
                 print(f"Attempt {attempts} - Iter {len(history)}: Cost {val:.4f}    ", end='\r')
+                # Early restart: if at iteration 50 the cost is already in the
+                # unphysical regime (< 1), abort this attempt instead of
+                # running all 400 iterations just to discard the result.
+                if len(history) == 50 and val < 1.0:
+                    raise _EarlyRestart()
 
-            result = minimize(
-                lambda p: self.cost_function(p, k, beta),
-                current_initial_params,
-                method='L-BFGS-B',
-                callback=callback,
-                options={'maxiter': 400}
-            )
-
-            eigenvalue = result.fun
-            optimized_params = result.x
+            try:
+                result = minimize(
+                    lambda p: self.cost_function(p, k, beta),
+                    current_initial_params,
+                    method='L-BFGS-B',
+                    callback=callback,
+                    options={'maxiter': 400}
+                )
+                eigenvalue = result.fun
+                optimized_params = result.x
+            except _EarlyRestart:
+                eigenvalue = history[-1]
+                optimized_params = last_x[0]
+                print(f"\n[EarlyRestart] Attempt {attempts} cost "
+                      f"{eigenvalue:.4f} at iter 50 (< 1). Restarting...")
+                continue
 
             if eigenvalue < 1.0:
                 print(f"\n[Warning] Attempt {attempts} found eigenvalue "
@@ -439,57 +429,8 @@ class WaveguideModeVQA:
 
         self.optimized_states.append(Statevector(self.ansatz(optimized_params, k)).data)
         self.eigenvalues.append(eigenvalue)
-        self.optimized_params_list = []
-        self.optimized_params_list.append(optimized_params)
 
         return eigenvalue, optimized_params, history
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # Parameter persistence
-    # ──────────────────────────────────────────────────────────────────────────
-
-    def save_all_results(self):
-        """Save all optimised modes stored in memory to the JSON file."""
-        if not hasattr(self, 'optimized_params_list'):
-            print("No parameters found to save. Run optimize_mode first.")
-            return
-        os.makedirs(self.params_dir, exist_ok=True)
-        for k, params in enumerate(self.optimized_params_list):
-            self.save_params(params, k, self.eigenvalues[k])
-        print(f"Successfully saved {len(self.optimized_params_list)} modes to {self.params_file}")
-
-    def save_params(self, params, k, eigenvalue):
-        """Save optimised parameters to a JSON file."""
-        os.makedirs(self.params_dir, exist_ok=True)
-        data = {}
-        if os.path.exists(self.params_file):
-            try:
-                with open(self.params_file, 'r') as f:
-                    data = json.load(f)
-            except Exception:
-                pass
-
-        plasma_tag = "plasma" if self.plasma_enabled else "vacuum"
-        key = f"{self.mode_type}_{plasma_tag}_nx{self.nx}_ny{self.ny}_nlayer_{self.n_layers}"
-        if key not in data:
-            data[key] = {}
-        data[key][f'mode_{k}'] = {'params': params.tolist(), 'eigenvalue': eigenvalue}
-
-        with open(self.params_file, 'w') as f:
-            json.dump(data, f, indent=2)
-
-    def load_params(self, k):
-        """Load optimised parameters from JSON file."""
-        if not os.path.exists(self.params_file):
-            return None
-        try:
-            with open(self.params_file, 'r') as f:
-                data = json.load(f)
-            plasma_tag = "plasma" if self.plasma_enabled else "vacuum"
-            key = f"{self.mode_type}_{plasma_tag}_nx{self.nx}_ny{self.ny}_nlayer_{self.n_layers}"
-            return np.array(data[key][f'mode_{k}']['params'])
-        except Exception:
-            return None
 
     # ──────────────────────────────────────────────────────────────────────────
     # Post-processing and visualisation
@@ -505,16 +446,6 @@ class WaveguideModeVQA:
     def compute_cutoff_frequency(self, eigenvalue: float) -> float:
         """Computes the cutoff frequency [Hz] from the eigenvalue."""
         return (self.c * np.sqrt(abs(eigenvalue))) / (2 * np.pi)
-
-    def calculate_fidelity(self, k: int, state: np.ndarray) -> float:
-        """Calculates the fidelity (overlap squared) with saved state for mode k."""
-        optimized_params = self.load_params(k)
-        if optimized_params is None:
-            print(f"No saved parameters found for mode {k}. Cannot compute fidelity.")
-            return -10.0
-        eigenvector = Statevector(self.ansatz(optimized_params, k)).data
-        overlap = np.abs(np.vdot(eigenvector, state))**2
-        return overlap
 
     def print_plot_parameters(self, k, eigenvalue, params):
         """Prints summary and plots the field distribution for mode k."""

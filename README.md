@@ -41,7 +41,6 @@ replacing random initialisation.
 │   ├── 03_train_ml_warmstart.ipynb    # Train the ML predictor
 │   └── 04_cold_plasma_with_ml.ipynb   # Plasma modes with ML warm-start
 │
-├── saved_parameters/                  # Pre-optimised VQE parameters (JSON)
 ├── warmstart_models/                  # Trained MLP models (joblib)
 ├── data/                              # Training data for ML warm-start
 ├── figures/                           # Generated plots

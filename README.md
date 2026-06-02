@@ -1,5 +1,9 @@
 # Quantum VQE Waveguide Solver
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![CI](https://github.com/JuanManuelsm95/quantum-vqe-waveguide/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanManuelsm95/quantum-vqe-waveguide/actions/workflows/ci.yml)
+
 Variational Quantum Eigensolver for computing electromagnetic modes of vacuum
 and cold-plasma-filled rectangular waveguides.
 
@@ -50,20 +54,39 @@ replacing random initialisation.
 ├── warmstart_models/                  # Trained MLP models (joblib)
 ├── data/                              # Training data for ML warm-start
 ├── figures/                           # Generated plots
+├── .github/workflows/ci.yml           # Test workflow
+├── pyproject.toml
 ├── requirements.txt
 ├── LICENSE
 └── README.md
 ```
 
-## Quick Start
 
-### 1. Install dependencies
+## Installation
+
+Editable install (recommended — this also wires up `from src import ...`):
+
+```bash
+pip install -e .
+```
+
+To additionally run the notebooks and the test suite:
+
+```bash
+pip install -e ".[notebooks,dev]"
+```
+
+Or, for a plain runtime environment:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Run a vacuum waveguide simulation
+## Quick Start
+
+
+
+### 1. Run a vacuum waveguide simulation
 
 ```python
 from src import WaveguideModeVQA
@@ -78,7 +101,7 @@ eigenvalue, params, history = solver.optimize_mode(k=0)
 solver.print_plot_parameters(0, eigenvalue, params)
 ```
 
-### 3. Add a plasma fill
+### 2. Add a plasma fill
 
 ```python
 solver = WaveguideModeVQA(
@@ -92,7 +115,7 @@ eigenvalue, params, history = solver.optimize_mode(k=0)
 solver.print_plasma_info(eigenvalue)
 ```
 
-### 4. Use ML warm-start
+### 3. Use ML warm-start
 
 ```python
 from src import WarmStartPredictor, WarmStartVQA
@@ -123,19 +146,36 @@ eigenvalue, params, history = solver.optimize_mode(k=0)
 | [03_train_ml_warmstart.ipynb](notebooks/03_train_ml_warmstart.ipynb) | Full ML training pipeline: data collection → MLP training → diagnostics → benchmarking. |
 | [04_cold_plasma_with_ml.ipynb](notebooks/04_cold_plasma_with_ml.ipynb) | Side-by-side comparison of ML warm-start vs random initialisation convergence. |
 
-## Pre-Trained Models
+## Results
 
-Pre-trained warm-start models and training data are included in
-`warmstart_models/` and `data/`. To retrain from scratch, run notebook 03.
+Reference cutoff frequencies for a 15 mm × 10 mm vacuum waveguide on a
+16 × 8 grid (classical diagonalisation of the finite-difference operator):
 
-Supported configurations (default training):
-- Grid: 4×4 (`nx=2, ny=2`), 2 ansatz layers
-- Modes: TM k=0,1 and TE k=0,1
-- Densities: vacuum and $N_e = 10^{17}$ m$^{-3}$
+| Mode | TM $\lambda$ (m⁻²) | TM $f$ (GHz) | TE $\lambda$ (m⁻²) | TE $f$ (GHz) |
+|------|-------------------:|-------------:|-------------------:|-------------:|
+| 0 | 141 158 | 17.93 | 43 724 | 9.98 |
+| 1 | 270 651 | 24.82 | 97 434 | 14.89 |
+| 2 | 418 627 | 30.87 | 141 158 | 17.93 |
+| 3 | 480 934 | 33.09 | 173 216 | 19.86 |
+
+The VQE reproduces these to high accuracy. For a uniform-plasma O-mode example,
+the VQE eigenvalue agrees with the dense numerical eigenvalue to a relative
+error of about **0.015%**. See the notebooks for full convergence plots.
+
+## Tests
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+The suite checks operator symmetry, that adding plasma shifts the spectrum
+upward, and that the VQE ground mode matches classical diagonalisation within
+tolerance.
 
 ## Dependencies
 
-- Python ≥ 3.9
+- Python ≥ 3.10
 - Qiskit ≥ 1.0
 - qiskit-algorithms
 - NumPy, SciPy, Matplotlib

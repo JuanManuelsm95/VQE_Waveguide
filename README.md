@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![CI](https://github.com/JuanManuelsm95/quantum-vqe-waveguide/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanManuelsm95/quantum-vqe-waveguide/actions/workflows/ci.yml)
+[![CI](https://github.com/JuanManuelsm95/VQE_Waveguide/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanManuelsm95/VQE_Waveguide/actions/workflows/ci.yml)
 
 Variational Quantum Eigensolver for computing electromagnetic modes of vacuum
 and cold-plasma-filled rectangular waveguides.

@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantum-vqe-waveguide"
+version = "0.1.0"
+description = "Variational Quantum Eigensolver for vacuum and cold-plasma-filled rectangular waveguide modes, with an ML warm-start."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Juan Manuel" }]
+keywords = ["quantum-computing", "vqe", "qiskit", "waveguide", "plasma", "eigensolver"]
+
+dependencies = [
+    "qiskit>=1.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+    "scikit-learn>=1.3",
+    "joblib>=1.3",
+]
+
+[project.optional-dependencies]
+# Tools needed only to run the notebooks
+notebooks = ["jupyter>=1.0", "ipykernel>=6.0"]
+# Tools needed only for development / CI
+dev = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/YOUR_USERNAME/quantum-vqe-waveguide"
+Repository = "https://github.com/YOUR_USERNAME/quantum-vqe-waveguide"
+
+# The importable package is the existing ``src`` directory, so that
+# ``from src import WaveguideModeVQA`` keeps working in the notebooks.
+[tool.setuptools]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

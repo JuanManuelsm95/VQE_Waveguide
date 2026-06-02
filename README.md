@@ -4,7 +4,7 @@ Variational Quantum Eigensolver for computing electromagnetic modes of vacuum
 and cold-plasma-filled rectangular waveguides.
 
 <p align="center">
-  <img src="figures/system_wave.png" alt="Waveguide VQE overview" width="700">
+  <img src="figures/repo_overview.png" alt="Waveguide VQE overview" width="700">
 </p>
 
 ## Overview
@@ -20,6 +20,12 @@ eigenvalue problems arising in rectangular waveguide theory:
 The spatial domain is discretised on a $2^{n_x} \times 2^{n_y}$ grid and
 encoded into $n_x + n_y$ qubits. A hardware-efficient ansatz (HEA) with
 Ry gates and CNOT entanglers is optimised with L-BFGS-B.
+
+<p align="center">
+  <img src="figures/system_wave.png" alt="Waveguide VQE overview" width="700">
+</p>
+
+This is the physical representation of our system.
 
 ### ML Warm-Start
 

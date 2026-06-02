@@ -4,7 +4,7 @@ Variational Quantum Eigensolver for computing electromagnetic modes of vacuum
 and cold-plasma-filled rectangular waveguides.
 
 <p align="center">
-  <img src="figures/repo_overview.png" alt="Waveguide VQE overview" width="700">
+  <img src="figures/system_wave.png" alt="Waveguide VQE overview" width="700">
 </p>
 
 ## Overview
@@ -164,8 +164,8 @@ If you use this code in your research, please cite:
 @software{quantum_vqe_waveguide,
   title  = {Quantum VQE Waveguide Solver with ML Warm-Start},
   author = {Juan Manuel},
-  year   = {2025},
-  url    = {https://github.com/YOUR_USERNAME/quantum-vqe-waveguide}
+  year   = {2026},
+  url    = {https://github.com/JuanManuelsm95/quantum-vqe-waveguide}
 }
 ```
 

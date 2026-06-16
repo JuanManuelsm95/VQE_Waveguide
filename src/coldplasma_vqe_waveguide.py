@@ -19,9 +19,7 @@ Supports two physical regimes:
 
 The boundary conditions are Dirichlet (TM modes) or Neumann (TE modes).
 
-Reference
-─────────
-  Eq. 4.9 in the accompanying thesis / report.
+
 
 Author : Juan Manuel
 License: MIT
@@ -412,7 +410,7 @@ class WaveguideModeVQA:
                     current_initial_params,
                     method='L-BFGS-B',
                     callback=callback,
-                    options={'maxiter': 400}
+                    options={'maxiter': 400},
                 )
                 eigenvalue = result.fun
                 optimized_params = result.x

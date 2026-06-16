@@ -215,7 +215,7 @@ class WarmStartCollector:
             plasma_density=plasma_density,
         )
     
-        # ── NEW: compute classical eigenvalues from M_dense ───────────────
+        
         classical_eigs = np.sort(np.linalg.eigvalsh(solver.M_dense))
     
         # Filter to physical eigenvalues only:
@@ -236,7 +236,7 @@ class WarmStartCollector:
         if verbose:
             print(f"  [collect] Classical eigenvalue for {mode_type} k={k}: "
                 f"λ_ref = {target_eig:.4f}")
-        # ── END NEW ───────────────────────────────────────────────────────
+        
 
         # ── Bootstrap lower modes on this solver ──────────────────────────
         # optimize_mode(k) for k > 0 needs solver.optimized_states[0..k-1]
@@ -275,7 +275,7 @@ class WarmStartCollector:
                         f"Failed to bootstrap mode {i} for key '{key}' "
                         f"after {bootstrap_max_tries} tries; cannot collect k={k}."
                     )
-        # ── END bootstrap ─────────────────────────────────────────────────
+        
 
         n_collected = 0
         n_rejected  = 0                                            # NEW counter
